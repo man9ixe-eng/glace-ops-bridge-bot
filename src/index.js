@@ -54,9 +54,20 @@ if (diag.length < 50 || diag.dotParts < 3 || diag.hasSpaces || diag.startsWithQu
 }
 
 // ===== Discord client =====
+// ===== Discord client =====
+const WebSocket = require("ws");
+
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  ws: {
+    WebSocket
+  }
 });
+
+// Keepalive so timers always run on some hosts
+setInterval(() => {
+  console.log("[OPS BRIDGE] heartbeat", { ready: client.isReady() });
+}, 30000);
 
 client.commands = new Collection();
 
