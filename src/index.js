@@ -153,7 +153,9 @@ app.get("/internal/roles", async (req, res) => {
 app.listen(PORT, () => console.log(`[OPS BRIDGE] 🌐 API listening on :${PORT}`));
 
 console.log("[OPS BRIDGE] Attempting Discord login...");
-client.login(DISCORD_TOKEN).catch(err => {
-  console.error("[OPS BRIDGE] Login failed:", err);
-  process.exit(1);
-});
+client.login(DISCORD_TOKEN)
+  .then(() => console.log("[OPS BRIDGE] login() promise resolved (token accepted)"))
+  .catch(err => {
+    console.error("[OPS BRIDGE] Login failed:", err);
+    process.exit(1);
+  });
