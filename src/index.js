@@ -25,9 +25,33 @@ const GUILD_ID = env("GUILD_ID");
 const OPS_SHARED_SECRET = env("OPS_SHARED_SECRET");
 const PORT = Number(process.env.PORT || 10000);
 
+function tokenSummary(tok) {
+  // DO NOT leak the token—only show safe diagnostics
+  const trimmed = (tok || "").trim();
+  const parts = trimmed.split(".");
+  return {
+    length: trimmed.length,
+    hasSpaces: /\s/.test(trimmed),
+    dotParts: parts.length,
+    startsWithQuote: trimmed.startsWith('"') || trimmed.startsWith("'"),
+    endsWithQuote: trimmed.endsWith('"') || trimmed.endsWith("'")
+  };
+}
+
+process.on("unhandledRejection", (e) => console.error("[OPS BRIDGE] UnhandledRejection:", e));
+process.on("uncaughtException", (e) => console.error("[OPS BRIDGE] UncaughtException:", e));
+
 console.log("[OPS BRIDGE] Booting...");
 console.log("[OPS BRIDGE] Node:", process.version);
 console.log("[OPS BRIDGE] Guild lock:", GUILD_ID);
+console.log("[OPS BRIDGE] Token diagnostics:", tokenSummary(DISCORD_TOKEN));
+
+// If token looks suspicious, crash immediately so you see it in logs
+const diag = tokenSummary(DISCORD_TOKEN);
+if (diag.length < 50 || diag.dotParts < 3 || diag.hasSpaces || diag.startsWithQuote || diag.endsWithQuote) {
+  console.error("[OPS BRIDGE] ❌ DISCORD_TOKEN looks invalid (wrong token, pasted with quotes/spaces, or not a bot token).");
+  process.exit(1);
+}
 
 // ===== Discord client =====
 const client = new Client({
@@ -36,7 +60,6 @@ const client = new Client({
 
 client.commands = new Collection();
 
-// Helpful gateway diagnostics
 client.on("error", (e) => console.error("[OPS BRIDGE] Client error:", e));
 client.on("warn", (m) => console.warn("[OPS BRIDGE] Warn:", m));
 client.on("shardError", (e) => console.error("[OPS BRIDGE] Shard error:", e));
@@ -65,9 +88,7 @@ function loadCommands() {
     jsonForRegister.push(mod.data.toJSON());
   }
 
-  if (jsonForRegister.length === 0) {
-    throw new Error("[OPS BRIDGE] No valid commands loaded.");
-  }
+  if (jsonForRegister.length === 0) throw new Error("[OPS BRIDGE] No valid commands loaded.");
   return jsonForRegister;
 }
 
@@ -122,7 +143,6 @@ client.on("interactionCreate", async (interaction) => {
 
 // ===== Internal API =====
 const app = express();
-
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/internal/roles", async (req, res) => {
@@ -137,7 +157,6 @@ app.get("/internal/roles", async (req, res) => {
 
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(userId).catch(() => null);
-
     if (!member) return res.status(404).json({ ok: false, error: "member_not_found" });
 
     const roleIds = member.roles.cache.map(r => r.id);
@@ -153,9 +172,19 @@ app.get("/internal/roles", async (req, res) => {
 app.listen(PORT, () => console.log(`[OPS BRIDGE] 🌐 API listening on :${PORT}`));
 
 console.log("[OPS BRIDGE] Attempting Discord login...");
-client.login(DISCORD_TOKEN)
-  .then(() => console.log("[OPS BRIDGE] login() promise resolved (token accepted)"))
-  .catch(err => {
-    console.error("[OPS BRIDGE] Login failed:", err);
+const loginPromise = client.login(DISCORD_TOKEN);
+
+loginPromise
+  .then(() => console.log("[OPS BRIDGE] ✅ login() promise resolved (token accepted, connecting to gateway)"))
+  .catch((err) => {
+    console.error("[OPS BRIDGE] ❌ Login failed:", err);
     process.exit(1);
   });
+
+// If we still haven't hit ready after 20s, force a restart so we get visible symptoms
+setTimeout(() => {
+  if (!client.isReady()) {
+    console.error("[OPS BRIDGE] ❌ Gateway connection did not reach READY within 20s. Forcing restart.");
+    process.exit(1);
+  }
+}, 20000);
