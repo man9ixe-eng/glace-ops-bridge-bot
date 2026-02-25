@@ -1,6 +1,8 @@
-"use strict";
+﻿"use strict";
 
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const {
   Client,
   GatewayIntentBits,
@@ -11,7 +13,6 @@ const {
 
 const { computeTier } = require("./config/roles");
 
-// ===== Env helpers =====
 function env(name, required = true) {
   const v = process.env[name];
   if (!v && required) throw new Error(`[ENV] Missing ${name}`);
@@ -24,32 +25,48 @@ const GUILD_ID = env("GUILD_ID");
 const OPS_SHARED_SECRET = env("OPS_SHARED_SECRET");
 const PORT = Number(process.env.PORT || 10000);
 
-// ===== Discord Client =====
+// ===== Discord client =====
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
-  ]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
 client.commands = new Collection();
 
-// Load commands
-const pingCmd = require("./bot/commands/ping");
-const postOpsCmd = require("./bot/commands/postOps");
-client.commands.set(pingCmd.data.name, pingCmd);
-client.commands.set(postOpsCmd.data.name, postOpsCmd);
+function loadCommands() {
+  const commandsDir = path.join(__dirname, "bot", "commands");
+  const files = fs.readdirSync(commandsDir).filter(f => f.endsWith(".js"));
 
-// Register commands to YOUR guild (instant updates)
-async function registerCommands() {
+  const jsonForRegister = [];
+
+  for (const file of files) {
+    const full = path.join(commandsDir, file);
+    const mod = require(full);
+
+    const hasData = !!mod?.data?.name && typeof mod.data.toJSON === "function";
+    const hasExec = typeof mod?.execute === "function";
+
+    if (!hasData || !hasExec) {
+      console.error(
+        `[OPS BRIDGE] ❌ Command file invalid: ${file} | data=${hasData} execute=${hasExec}`
+      );
+      continue;
+    }
+
+    client.commands.set(mod.data.name, mod);
+    jsonForRegister.push(mod.data.toJSON());
+  }
+
+  if (jsonForRegister.length === 0) {
+    throw new Error("[OPS BRIDGE] No valid command modules loaded. Check src/bot/commands/*.js exports.");
+  }
+
+  return jsonForRegister;
+}
+
+async function registerCommands(body) {
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-  const body = [
-    pingCmd.data.toJSON(),
-    postOpsCmd.data.toJSON()
-  ];
-
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body });
-  console.log(`[OPS BRIDGE] ✅ Registered slash commands to guild ${GUILD_ID}`);
+  console.log(`[OPS BRIDGE] ✅ Registered ${body.length} slash commands to guild ${GUILD_ID}`);
 }
 
 // Hard-lock: leave any server not Glace
@@ -66,21 +83,25 @@ client.on("guildCreate", async (guild) => {
 
 client.once("ready", async () => {
   console.log(`[OPS BRIDGE] ✅ Logged in as ${client.user.tag}`);
-  await registerCommands();
+
+  const body = loadCommands();
+  await registerCommands(body);
 });
 
-// Interaction handler
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
+
     if (!interaction.guild || interaction.guild.id !== GUILD_ID) {
       return interaction.reply({ content: "❌ This bot is locked to Glace only.", ephemeral: true });
     }
 
     const cmd = client.commands.get(interaction.commandName);
-    if (!cmd) return;
+    if (!cmd) {
+      return interaction.reply({ content: "❌ Command not found (bot not synced).", ephemeral: true });
+    }
 
-    await cmd.execute(interaction, { client });
+    await cmd.execute(interaction);
   } catch (err) {
     console.error("[OPS BRIDGE] interaction error:", err);
     if (interaction.isRepliable()) {
@@ -94,55 +115,37 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// ===== Internal API (Next.js will call this) =====
+// ===== Internal API =====
 const app = express();
 
-// health check
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Secure roles endpoint
-// GET /internal/roles?userId=123
 app.get("/internal/roles", async (req, res) => {
   try {
     const auth = req.header("authorization") || "";
-    const expected = `Bearer ${OPS_SHARED_SECRET}`;
-    if (auth !== expected) {
+    if (auth !== `Bearer ${OPS_SHARED_SECRET}`) {
       return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
     const userId = String(req.query.userId || "").trim();
-    if (!userId) {
-      return res.status(400).json({ ok: false, error: "missing userId" });
-    }
+    if (!userId) return res.status(400).json({ ok: false, error: "missing userId" });
 
-    // Fetch member from Glace guild
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(userId).catch(() => null);
 
-    if (!member) {
-      return res.status(404).json({ ok: false, error: "member_not_found" });
-    }
+    if (!member) return res.status(404).json({ ok: false, error: "member_not_found" });
 
     const roleIds = member.roles.cache.map(r => r.id);
     const tier = computeTier(roleIds);
 
-    return res.json({
-      ok: true,
-      userId,
-      guildId: GUILD_ID,
-      roleIds,
-      tier
-    });
+    return res.json({ ok: true, userId, guildId: GUILD_ID, roleIds, tier });
   } catch (e) {
     console.error("[OPS BRIDGE] /internal/roles error:", e);
     return res.status(500).json({ ok: false, error: "server_error" });
   }
 });
 
-// Start web server + discord client
-app.listen(PORT, () => {
-  console.log(`[OPS BRIDGE] 🌐 API listening on :${PORT}`);
-});
+app.listen(PORT, () => console.log(`[OPS BRIDGE] 🌐 API listening on :${PORT}`));
 
 client.login(DISCORD_TOKEN).catch(err => {
   console.error("[OPS BRIDGE] Login failed:", err);
