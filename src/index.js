@@ -25,12 +25,23 @@ const GUILD_ID = env("GUILD_ID");
 const OPS_SHARED_SECRET = env("OPS_SHARED_SECRET");
 const PORT = Number(process.env.PORT || 10000);
 
+console.log("[OPS BRIDGE] Booting...");
+console.log("[OPS BRIDGE] Node:", process.version);
+console.log("[OPS BRIDGE] Guild lock:", GUILD_ID);
+
 // ===== Discord client =====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
 client.commands = new Collection();
+
+// Helpful gateway diagnostics
+client.on("error", (e) => console.error("[OPS BRIDGE] Client error:", e));
+client.on("warn", (m) => console.warn("[OPS BRIDGE] Warn:", m));
+client.on("shardError", (e) => console.error("[OPS BRIDGE] Shard error:", e));
+client.on("shardDisconnect", (event) => console.warn("[OPS BRIDGE] Shard disconnect:", event?.code, event?.reason));
+client.on("shardReconnecting", () => console.warn("[OPS BRIDGE] Shard reconnecting..."));
 
 function loadCommands() {
   const commandsDir = path.join(__dirname, "bot", "commands");
@@ -46,9 +57,7 @@ function loadCommands() {
     const hasExec = typeof mod?.execute === "function";
 
     if (!hasData || !hasExec) {
-      console.error(
-        `[OPS BRIDGE] ❌ Command file invalid: ${file} | data=${hasData} execute=${hasExec}`
-      );
+      console.error(`[OPS BRIDGE] ❌ Command invalid: ${file} | data=${hasData} exec=${hasExec}`);
       continue;
     }
 
@@ -57,9 +66,8 @@ function loadCommands() {
   }
 
   if (jsonForRegister.length === 0) {
-    throw new Error("[OPS BRIDGE] No valid command modules loaded. Check src/bot/commands/*.js exports.");
+    throw new Error("[OPS BRIDGE] No valid commands loaded.");
   }
-
   return jsonForRegister;
 }
 
@@ -73,7 +81,7 @@ async function registerCommands(body) {
 client.on("guildCreate", async (guild) => {
   try {
     if (guild.id !== GUILD_ID) {
-      console.log(`[OPS BRIDGE] 🔒 Joined non-Glace guild (${guild.id}). Leaving immediately.`);
+      console.log(`[OPS BRIDGE] 🔒 Joined non-Glace guild (${guild.id}). Leaving.`);
       await guild.leave();
     }
   } catch (e) {
@@ -83,7 +91,6 @@ client.on("guildCreate", async (guild) => {
 
 client.once("ready", async () => {
   console.log(`[OPS BRIDGE] ✅ Logged in as ${client.user.tag}`);
-
   const body = loadCommands();
   await registerCommands(body);
 });
@@ -97,9 +104,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const cmd = client.commands.get(interaction.commandName);
-    if (!cmd) {
-      return interaction.reply({ content: "❌ Command not found (bot not synced).", ephemeral: true });
-    }
+    if (!cmd) return interaction.reply({ content: "❌ Command not found (bot not synced).", ephemeral: true });
 
     await cmd.execute(interaction);
   } catch (err) {
@@ -147,6 +152,7 @@ app.get("/internal/roles", async (req, res) => {
 
 app.listen(PORT, () => console.log(`[OPS BRIDGE] 🌐 API listening on :${PORT}`));
 
+console.log("[OPS BRIDGE] Attempting Discord login...");
 client.login(DISCORD_TOKEN).catch(err => {
   console.error("[OPS BRIDGE] Login failed:", err);
   process.exit(1);
